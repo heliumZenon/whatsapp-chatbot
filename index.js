@@ -1,85 +1,263 @@
-require('dotenv').config();
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const readline = require('readline');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const OpenAI = require('openai');
+const fs = require('fs');
+const path = require('path');
+const qrcodeGenerator = require('qrcode');
 const functions = require('./functions');
 
-const assistant = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
 });
 
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        args: ['--no-sandbox'],
-    }
-});
-
-const adminNumber = '923499490427';
-let isBotActive = true; // Control the bot's active state
-
-function stopBot() {
-    isBotActive = false;
-    console.log('Bot has been paused.');
+function promptForAPIKey() {
+    rl.question('Please enter your OpenAI API key: ', (apiKey) => {
+        if (apiKey) {
+            rl.close();
+            startClient(apiKey);
+        } else {
+            console.log('API key is required.');
+            promptForAPIKey(); // Retry if no API key is provided
+        }
+    });
 }
 
-function startBot() {
-    isBotActive = true;
-    console.log('Bot is now active.');
+function startClient(apiKey) {
+    const assistant = new OpenAI({
+        apiKey: apiKey,
+    });
+
+    const client = new Client({
+        authStrategy: new LocalAuth(),
+        puppeteer: {
+            headless: true,
+            args: ['--no-sandbox'],
+        }
+    });
+
+    const adminNumber = '923499490427';
+    let isBotActive = true; // Control the bot's active state
+    let currentMode = '!!qr'; // Start in QR mode by default
+    const dataFolderPath = path.join(__dirname, 'Data');
+    const userDataFilePath = path.join(dataFolderPath, 'user_data.txt');
+
+    function stopBot() {
+        isBotActive = false;
+        console.log('Bot has been paused.');
+    }
+
+    function startBot() {
+        isBotActive = true;
+        console.log('Bot is now active.');
+    }
+
+    client.on('qr', (qr) => {
+        qrcode.generate(qr, { small: true });
+        console.log('Scan the QR code above to log in to WhatsApp');
+    });
+
+    client.on('ready', () => {
+        console.log('Client is ready!');
+    });
+
+    client.on('message', async (message) => {
+        const senderId = message.from;
+        const senderNumber = senderId.split('@')[0];
+        const isAdmin = senderNumber === adminNumber;
+        const isModerator = functions.isModerator(senderNumber);
+        const messageText = message.body.toLowerCase().trim();
+
+        console.log(`Received message from ${senderNumber}: ${messageText}`);
+
+        if (messageText.startsWith('!!pause') && (isAdmin || isModerator)) {
+            stopBot();
+            message.reply('Bot has been paused.');
+            return;
+        }
+
+        if (messageText.startsWith('!!start') && (isAdmin || isModerator)) {
+            startBot();
+            message.reply('Bot is now active.');
+            return;
+        }
+
+        if (messageText.startsWith('!!qr') && isAdmin) {
+            currentMode = '!!qr';
+            message.reply('Switched to QR mode.');
+            return;
+        }
+
+        if (messageText.startsWith('!!ai') && isAdmin) {
+            currentMode = '!!ai';
+            message.reply('Switched to AI mode.');
+            return;
+        }
+
+        if (currentMode === '!!qr' && isBotActive) {
+            if (messageText === 'yes') {
+                const userData = getUserData(senderNumber);
+                if (userData) {
+                    const qrCodePath = path.join(dataFolderPath, `${senderNumber}_qrcode.png`);
+                    try {
+                        const qrText = `${userData.phoneNumber}:${userData.name}`;
+                        await generateQRCode(qrText, qrCodePath);
+                        const qrCodeMedia = MessageMedia.fromFilePath(qrCodePath);
+                        await client.sendMessage(senderId, "Here is your QR code:", { media: qrCodeMedia });
+                        await client.sendMessage(`${adminNumber}@c.us`, `User ${userData.name} with number ${senderNumber} is coming.`);
+                        console.log(`Sent QR code to ${senderNumber}`);
+                    } catch (error) {
+                        console.error(`Failed to generate or send QR code to ${senderNumber}: ${error.message}`);
+                    }
+                } else {
+                    await client.sendMessage(senderId, "Your number is not registered for the event.");
+                    console.log(`Number ${senderNumber} not found in user_data.txt`);
+                }
+            } else if (messageText === 'no') {
+                await client.sendMessage(senderId, "Thanks for your response.");
+                console.log(`Sent thanks message to ${senderNumber}`);
+            } else {
+                const predefinedMessage = "Hello, Do you want to join this event? Please reply with yes or no";
+                const mediaPath = path.join(dataFolderPath, 'data.png'); // Change to 'data.mp4' if using video
+
+                console.log(`Looking for media file at: ${mediaPath}`);
+                
+                try {
+                    let media;
+                    if (fs.existsSync(mediaPath)) {
+                        media = MessageMedia.fromFilePath(mediaPath);
+                        await client.sendMessage(senderId, predefinedMessage, { media });
+                        console.log(`Sent predefined message with media to ${senderNumber}`);
+                    } else {
+                        await client.sendMessage(senderId, predefinedMessage);
+                        console.log(`Media file not found. Sent predefined message without media to ${senderNumber}`);
+                    }
+                } catch (error) {
+                    console.error(`Failed to send message to ${senderNumber}: ${error.message}`);
+                }
+            }
+        } else if (currentMode === '!!ai' && isBotActive) {
+            functions.handleCommand(client, assistant, message, senderNumber, isAdmin, isModerator);
+        }
+    });
+
+    function getUserData(phoneNumber) {
+        try {
+            const data = fs.readFileSync(userDataFilePath, 'utf8');
+            const users = JSON.parse(data);
+            return users.find(user => user.phoneNumber === phoneNumber);
+        } catch (error) {
+            console.error("Error reading user data file:", error);
+            return null;
+        }
+    }
+
+    async function generateQRCode(text, outputPath) {
+        try {
+            await qrcodeGenerator.toFile(outputPath, text);
+        } catch (error) {
+            console.error("Error generating QR code:", error);
+        }
+    }
+
+    client.on('error', (error) => {
+        console.error('An error occurred:', error);
+    });
+
+    client.initialize();
 }
 
-client.on('qr', (qr) => {
-    // Generate and display QR code in the terminal
-    qrcode.generate(qr, { small: true });
-    console.log('Scan the QR code above to log in to WhatsApp');
-});
+// Start the prompt for API key
+promptForAPIKey();
 
-client.on('ready', () => {
-    console.log('Client is ready!');
-});
 
-client.on('message', async (message) => {
-    const senderId = message.from;
-    const senderNumber = senderId.split('@')[0];
+////////////////////////////////////////////////
 
-    const isAdmin = senderNumber === adminNumber;
-    const isModerator = functions.isModerator(senderNumber);
 
-    const messageText = message.body.toLowerCase();
 
-    // Handle bot start/stop commands directly in index.js
-    if (messageText.startsWith('!!pause') && (isAdmin || isModerator)) {
-        stopBot();
-        message.reply('Bot has been paused.');
-        return;
-    }
+// require('dotenv').config();
+// const { Client, LocalAuth } = require('whatsapp-web.js');
+// const qrcode = require('qrcode-terminal');
+// const OpenAI = require('openai');
+// const functions = require('./functions');
 
-    if (messageText.startsWith('!!start') && (isAdmin || isModerator)) {
-        startBot();
-        message.reply('Bot is now active.');
-        return;
-    }
+// const assistant = new OpenAI({
+//   apiKey: process.env.OPENAI_API_KEY,
+// });
 
-    // Allow command processing even when bot is paused
-    if (messageText.startsWith('!!')) {
-        functions.handleCommand(client, assistant, message, senderNumber, isAdmin, isModerator);
-        return; // Exit after handling command to avoid processing as a regular message
-    }
+// const client = new Client({
+//     authStrategy: new LocalAuth(),
+//     puppeteer: {
+//         headless: true,
+//         args: ['--no-sandbox'],
+//     }
+// });
 
-    // Only process regular messages if the bot is active
-    if (isBotActive) {
-        functions.handleCommand(client, assistant, message, senderNumber, isAdmin, isModerator);
-    } else {
-        console.log('Bot is paused, no response sent.');
-    }
-});
+// const adminNumber = '923499490427';
+// let isBotActive = true; // Control the bot's active state
 
-client.on('error', (error) => {
-    console.error('An error occurred:', error);
-});
+// function stopBot() {
+//     isBotActive = false;
+//     console.log('Bot has been paused.');
+// }
 
-client.initialize();
+// function startBot() {
+//     isBotActive = true;
+//     console.log('Bot is now active.');
+// }
+
+// client.on('qr', (qr) => {
+//     // Generate and display QR code in the terminal
+//     qrcode.generate(qr, { small: true });
+//     console.log('Scan the QR code above to log in to WhatsApp');
+// });
+
+// client.on('ready', () => {
+//     console.log('Client is ready!');
+// });
+
+// client.on('message', async (message) => {
+//     const senderId = message.from;
+//     const senderNumber = senderId.split('@')[0];
+
+//     const isAdmin = senderNumber === adminNumber;
+//     const isModerator = functions.isModerator(senderNumber);
+
+//     const messageText = message.body.toLowerCase();
+
+//     // Handle bot start/stop commands directly in index.js
+//     if (messageText.startsWith('!!pause') && (isAdmin || isModerator)) {
+//         stopBot();
+//         message.reply('Bot has been paused.');
+//         return;
+//     }
+
+//     if (messageText.startsWith('!!start') && (isAdmin || isModerator)) {
+//         startBot();
+//         message.reply('Bot is now active.');
+//         return;
+//     }
+
+//     // Allow command processing even when bot is paused
+//     if (messageText.startsWith('!!')) {
+//         functions.handleCommand(client, assistant, message, senderNumber, isAdmin, isModerator);
+//         return; // Exit after handling command to avoid processing as a regular message
+//     }
+
+//     // Only process regular messages if the bot is active
+//     if (isBotActive) {
+//         functions.handleCommand(client, assistant, message, senderNumber, isAdmin, isModerator);
+//     } else {
+//         console.log('Bot is paused, no response sent.');
+//     }
+// });
+
+// client.on('error', (error) => {
+//     console.error('An error occurred:', error);
+// });
+
+// client.initialize();
 
 
 

@@ -9,6 +9,11 @@ const ignoreList = new Set();
 let assistantKey = 'asst_6xFy9UjYJsmSbPiKqmI5TPee';
 const userThreads = {};
 const DEFAULT_MESSAGE_LIMIT = 100; // Added default message limit
+const fs = require('fs');
+const path = require('path');
+
+const dataFolderPath = path.join(__dirname, 'Data');
+const userDataFilePath = path.join(dataFolderPath, 'user_data.txt');
 
 
 async function sendMessageWithValidation(client, number, message, senderNumber) {
@@ -299,11 +304,8 @@ function hasPermission(senderNumber, command, isAdmin, isModerator) {
 
 async function handleCommand(client, assistantOrOpenAI, message, senderNumber, isAdmin, isModerator) {
     try {
-        // Extract the assistant key without converting to lowercase
         let messageText = message.body.trim();
         const [command, ...args] = messageText.split(' ');
-
-        // Convert only the command to lowercase, keep assistant key as it is
         const lowerCommand = command.toLowerCase();
 
         if (ignoreList.has(senderNumber) && lowerCommand !== '!!sub' && lowerCommand !== '!!bot') {
@@ -325,7 +327,6 @@ async function handleCommand(client, assistantOrOpenAI, message, senderNumber, i
                             message.reply('Please provide a valid assistant key using !!set-key "YourKey".');
                         }
                         break;
-
 
                     case '!!set-reminder':
                         const [number, remindMessage, time] = extractMultipleQuotedStrings(args.join(' '));
@@ -418,6 +419,34 @@ async function handleCommand(client, assistantOrOpenAI, message, senderNumber, i
                         message.reply('All threads have been cleared.');
                         break;
 
+                    case '!!update-data':
+                        if (isAdmin) {
+                            if (message.hasMedia) {
+                                const media = await message.downloadMedia();
+                                if (media.mimetype === 'application/json') {
+                                    try {
+                                        const dataFolderPath = path.join(__dirname, 'Data');
+                                        const userDataFilePath = path.join(dataFolderPath, 'user_data.txt');
+                                        fs.writeFileSync(userDataFilePath, Buffer.from(media.data, 'base64').toString('utf8'));
+                                        message.reply('User data has been updated successfully.');
+                                        console.log(`User data file updated by admin ${senderNumber}`);
+                                    } catch (error) {
+                                        message.reply('Failed to update user data.');
+                                        console.error(`Failed to update user data file: ${error.message}`);
+                                    }
+                                } else {
+                                    message.reply('Please attach a valid JSON file.');
+                                    console.error('Invalid file type attached for !!update-data command.');
+                                }
+                            } else {
+                                message.reply('Please attach the user_data.txt file with the !!update-data command.');
+                                console.error('No file attached with !!update-data command.');
+                            }
+                        } else {
+                            message.reply("You don't have permission to use this command.");
+                        }
+                        break;
+
                     case '!!show-menu':
                         if (isAdmin) {
                             message.reply(showMenu(true, false)); // Admin menu
@@ -427,7 +456,6 @@ async function handleCommand(client, assistantOrOpenAI, message, senderNumber, i
                             message.reply(showMenu(false, false)); // User menu
                         }
                         break;
-
 
                     case '!!un-sub':
                     case '!!live-chat':
@@ -466,6 +494,7 @@ async function handleCommand(client, assistantOrOpenAI, message, senderNumber, i
         message.reply("An error occurred while processing your command. Please check your input and try again.");
     }
 }
+
 
 function extractQuotedString(text) {
     try {
